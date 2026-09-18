@@ -1,0 +1,197 @@
+name: cloud-computing-activity-4
+x-api: &api
+  build:
+    context: .
+    target: production
+  image: cloud-computing-activity-4:local
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: ["/tmp:size=32m,mode=1777"]
+  mem_limit: 512m
+  cpus: 1.0
+  environment:
+    APP_DATABASE_URL: postgres://cloud_app:${APP_DB_PASSWORD:?Set APP_DB_PASSWORD}@postgres:5432/cloud3
+    APP_CONTENT_ROOT: /data/content
+    APP_REDIS_URL: redis://redis:6379/0
+    APP_S3_ENDPOINT_URL: http://minio:9000
+    APP_S3_BUCKET: activity4-content
+    APP_S3_ACCESS_KEY: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+    APP_S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+  healthcheck:
+    test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=2)"]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+
+services:
+  # ── Redis: session cache (Activity 4, task 1) ───────────────────────────
+  # Sessions are small, read on every request and meant to expire on their
+  # own. `--appendonly no` is deliberate: this data is a cache, losing it on
+  # restart only means everyone logs in again.
+  redis:
+    image: redis:7.4.1-alpine
+    # --save "" disables RDB snapshots as well: this is a cache, nothing here
+    # is worth persisting, and with no writes at all the read-only filesystem
+    # holds.
+    command: redis-server --appendonly no --save "" --maxmemory 128mb --maxmemory-policy noeviction
+    # Start as the redis user directly. The image's entrypoint would normally
+    # drop from root itself, but that needs CAP_SETUID/CAP_SETGID, which
+    # cap_drop removes — so it is dropped here instead, before the container
+    # ever runs as root.
+    user: redis
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 192m
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    # No published port: only the APIs on the internal network reach it.
+
+  # ── MinIO: S3-compatible object storage (Activity 4, task 2) ────────────
+  # Speaks the S3 API, so the application adapter is the same one that would
+  # run against AWS; only the endpoint and the credentials change.
+  minio:
+    # quay.io is MinIO's own registry; the Docker Hub mirror does not carry
+    # every RELEASE tag. This is the tag the course template uses.
+    image: quay.io/minio/minio:RELEASE.2023-11-01T01-57-10Z
+    command: server /data --console-address ":9090"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+    volumes: ["miniodata:/data"]
+    ports:
+      - "127.0.0.1:9090:9090"   # web console, bound to localhost only
+    mem_limit: 512m
+    healthcheck:
+      test: [CMD, mc, ready, local]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    image: cloud-computing-activity-4-postgres:local
+    environment:
+      POSTGRES_DB: cloud3
+      POSTGRES_USER: cloud_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Set APP_DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init-role.sh:/docker-entrypoint-initdb.d/10-role.sh:ro
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U cloud_admin -d cloud3]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build:
+      context: .
+      target: production
+    image: cloud-computing-activity-4:local
+    environment:
+      MIGRATION_DATABASE_URL: postgres://cloud_admin:${POSTGRES_PASSWORD}@postgres:5432/cloud3
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: aerich upgrade
+
+  make_migrations:
+    profiles: [tools]
+    build:
+      context: .
+      target: development
+    environment:
+      MIGRATION_DATABASE_URL: postgres://cloud_admin:${POSTGRES_PASSWORD}@postgres:5432/cloud3
+    volumes: [".:/app"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: aerich migrate
+
+  authentication-api:
+    <<: *api
+    ports: ["127.0.0.1:8101:8000"]
+    command: uvicorn app.authentication.main:app --host 0.0.0.0 --port 8000 --no-access-log
+
+  files-api:
+    <<: *api
+    ports: ["127.0.0.1:8102:8000"]
+    # NOTE: `environment` REPLACES the anchor's block, it does not merge with
+    # it, so every variable the anchor defines has to be repeated here.
+    environment:
+      APP_DATABASE_URL: postgres://cloud_app:${APP_DB_PASSWORD}@postgres:5432/cloud3
+      APP_AUTH_SERVICE_URL: http://authentication-api:8000
+      APP_CONTENT_ROOT: /data/content
+      APP_REDIS_URL: redis://redis:6379/0
+      APP_S3_ENDPOINT_URL: http://minio:9000
+      APP_S3_BUCKET: activity4-content
+      APP_S3_ACCESS_KEY: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+      APP_S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+    volumes: ["content:/data/content"]
+    command: uvicorn app.files.main:app --host 0.0.0.0 --port 8000 --no-access-log
+
+  test:
+    profiles: [test]
+    build:
+      context: .
+      target: test
+    environment:
+      APP_DATABASE_URL: postgres://cloud_admin:${POSTGRES_PASSWORD}@postgres:5432/cloud3_test
+      AUTH_BASE_URL: http://authentication-api:8000
+      FILES_BASE_URL: http://files-api:8000
+      # The adapter suites need the real backends; they skip themselves when
+      # these are unreachable, so the domain suite still runs standalone.
+      APP_REDIS_URL: redis://redis:6379/1
+      APP_S3_ENDPOINT_URL: http://minio:9000
+      APP_S3_BUCKET: activity4-content
+      APP_S3_ACCESS_KEY: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+      APP_S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+    volumes: ["./artifacts:/app/artifacts"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  quality:
+    profiles: [quality]
+    build:
+      context: .
+      target: quality
+
+  format:
+    profiles: [quality]
+    build:
+      context: .
+      target: development
+    volumes: [".:/app"]
+    entrypoint: sh -c "black --config .black app tests scripts && ruff check --fix app tests scripts"
+
+  security:
+    profiles: [security]
+    build:
+      context: .
+      target: security
+
+volumes:
+  miniodata:
+  pgdata:
+  content:

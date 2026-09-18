@@ -1,0 +1,64 @@
+# Task 3 of the activity: "Publish the project image in docker hub".
+#
+# One image serves both APIs: they share the same code and differ only in the
+# uvicorn command, so building twice would be wasted work. The production
+# stage of the Dockerfile is the one published (non-root, no build tools).
+name: Publish image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and push to Docker Hub
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+
+      # buildx enables layer caching against the GitHub Actions cache, which
+      # turns a repeated build from minutes into seconds.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+
+      # Credentials come from repository secrets, never from the repository.
+      # DOCKERHUB_TOKEN should be an access token with write scope, not the
+      # account password: a token can be revoked on its own.
+      - name: Log in to Docker Hub
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Produces tags automatically: `latest` on the default branch, the
+      # version on a v* tag, and the commit sha always, so any deployment can
+      # be traced back to the exact code that produced it.
+      - name: Compute tags
+        id: meta
+        uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/cloud-computing-activity-4
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: .
+          target: production
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

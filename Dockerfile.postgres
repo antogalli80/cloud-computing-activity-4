@@ -1,0 +1,6 @@
+FROM postgres:17-trixie
+RUN apt-get update && apt-get upgrade --yes && rm -rf /var/lib/apt/lists/*
+# The official entrypoint supports direct execution as postgres. With named volumes
+# already owned by postgres, the root-only gosu helper is unnecessary.
+RUN rm /usr/local/bin/gosu
+USER postgres

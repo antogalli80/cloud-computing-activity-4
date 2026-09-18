@@ -1,0 +1,47 @@
+name: Verification
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Generate synthetic environment credentials
+        run: python3 scripts/configure.py
+      - name: Validate configuration
+        run: docker compose config --quiet
+      - name: Quality
+        run: docker compose --profile quality run --rm --build quality
+      - name: Build and start services
+        run: docker compose up --build --wait authentication-api files-api
+      - name: Database and domain tests
+        run: docker compose --profile test run --rm --build test pytest --cov=app --cov-report=json:artifacts/coverage.json --junitxml=artifacts/junit.xml
+      - name: Real HTTP integration
+        run: docker compose --profile test run --rm test python scripts/live_s3.py
+      - name: Dependency audit
+        run: |
+          docker compose --profile security build security
+          docker compose --profile security run --rm security pip-audit --requirement requirements/base.txt --format json > artifacts/dependency-audit-ci.json
+          python3 -c "import json; json.load(open('artifacts/dependency-audit-ci.json'))"
+      - name: Upload verification evidence
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: verification-evidence
+          retention-days: 14
+          path: |
+            artifacts/coverage.json
+            artifacts/junit.xml
+            artifacts/live-http.json
+            artifacts/dependency-audit-ci.json
+      - name: Stop isolated services
+        if: always()
+        run: docker compose down
