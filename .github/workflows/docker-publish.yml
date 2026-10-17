@@ -34,7 +34,7 @@ jobs:
       # DOCKERHUB_TOKEN should be an access token with write scope, not the
       # account password: a token can be revoked on its own.
       - name: Log in to Docker Hub
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
